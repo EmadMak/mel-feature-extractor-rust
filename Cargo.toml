@@ -1,0 +1,15 @@
+[package]
+name = "mel_feature_extractor_rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mel_feature_extractor_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+hound = "3"
+realfft = "3"
+rustfft = "6"
+
+
