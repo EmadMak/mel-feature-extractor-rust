@@ -11,5 +11,5 @@ crate-type = ["cdylib"]
 hound = "3"
 realfft = "3"
 rustfft = "6"
-
+rubato = { version = "0.16" }
 
