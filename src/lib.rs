@@ -1,4 +1,4 @@
-use hound::WavReader;
+use hound::{WavReader, WavSpec, SampleFormat, WavWriter};
 use std::{ffi::CStr, i16};
 use std::os::raw::c_char;
 use rubato::{SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction, Resampler};
@@ -47,6 +47,30 @@ fn resample_audio(input: Vec<f32>, orig_rate: u32, target_rate: u32) -> Result<V
     Ok(outputs.into_iter().next().unwrap())
 }
 
+fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+
+    let mut writer = WavWriter::create(out_path, spec)
+        .map_err(|e| format!("Failed to open WAV: {}", e))?;
+
+    for &sample in samples {
+        let scaled = (sample.max(-1.0).min(1.0) * i16::MAX as f32) as i16;
+        writer
+            .write_sample(scaled)
+            .map_err(|e| format!("Failed to write sample: {}", e))?;
+    }
+
+    writer
+        .finalize()
+        .map_err(|e| format!("Failed to finalize wav: {}", e))?;
+
+    Ok(())
+}
 
 #[no_mangle]
 pub extern "C" fn extract_whisper_features(path: *const c_char) {
@@ -75,7 +99,11 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
-    println!("Final sample count: {}", mel_ready.len())
+    println!("Final sample count: {}", mel_ready.len());
+
+    if let Err(err) = save_wav("resampled.wav", &mel_ready, 16000) {
+        eprintln!("Could not save resampled wav: {}", err);
+    }
 }
 
 
