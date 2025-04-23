@@ -47,6 +47,18 @@ fn resample_audio(input: Vec<f32>, orig_rate: u32, target_rate: u32) -> Result<V
     Ok(outputs.into_iter().next().unwrap())
 }
 
+fn pad_or_truncate(input: Vec<f32>, target_len: usize) -> Result<Vec<f32>, String> {
+    if input.len() == target_len {
+        return Ok(input);
+    }
+    if input.len() > target_len {
+        return Ok(input[..target_len].to_vec());
+    }
+    let mut padded = input;
+    padded.resize(target_len, 0.0);
+    Ok(padded)
+}
+
 fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     let spec = WavSpec {
         channels: 1,
@@ -86,13 +98,21 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
     let (mono, orig_sample_rate) = match read_wav(path_str) {
         Ok(v) => v,
         Err(err) => {
-            eprint!("{}", err);
+            eprintln!("{}", err);
             return;
         }
     };
 
-    let mel_ready = match resample_audio(mono, orig_sample_rate, 16000) {
+    let resampled = match resample_audio(mono, orig_sample_rate, 16000) {
         Ok(buf) => buf,
+        Err(err) => {
+            eprintln!("{}", err);
+            return;
+        }
+    };
+
+    let mel_ready = match pad_or_truncate(resampled, 480000) {
+        Ok(v) => v,
         Err(err) => {
             eprintln!("{}", err);
             return;
