@@ -47,16 +47,19 @@ fn resample_audio(input: Vec<f32>, orig_rate: u32, target_rate: u32) -> Result<V
     Ok(outputs.into_iter().next().unwrap())
 }
 
-fn pad_or_truncate(input: Vec<f32>, target_len: usize) -> Result<Vec<f32>, String> {
-    if input.len() == target_len {
-        return Ok(input);
-    }
+fn pad_or_truncate(mut input: Vec<f32>, target_len: usize, frame_length: usize) -> Result<Vec<f32>, String> {
     if input.len() > target_len {
-        return Ok(input[..target_len].to_vec());
+        input.truncate(target_len);
+    } else if input.len() < target_len {
+        input.resize(target_len, 0.0);
     }
-    let mut padded = input;
-    padded.resize(target_len, 0.0);
-    Ok(padded)
+
+    let pad_each = frame_length / 2;
+    let mut out = Vec::with_capacity(pad_each + input.len() + pad_each);
+    out.extend(std::iter::repeat(0.0).take(pad_each));
+    out.extend(input);
+    out.extend(std::iter::repeat(0.0).take(pad_each));
+    Ok(out)
 }
 
 fn normalize(input: Vec<f32>) -> Result<Vec<f32>, String> {
@@ -71,6 +74,22 @@ fn normalize(input: Vec<f32>) -> Result<Vec<f32>, String> {
     }
 
     Ok(input.into_iter().map(|x| (x - mean) / std).collect())
+} 
+
+fn frame_signal(input: Vec<f32>, frame_length: usize, hop_length: usize) -> Result<Vec<Vec<f32>>, String> {
+    let num_frames = (input.len() - frame_length + hop_length) / hop_length;
+    let mut frames = Vec::with_capacity(num_frames);
+
+    for i in 0..num_frames {
+        let start = i * hop_length;
+        let end = start + frame_length;
+
+        if end <= input.len() {
+            frames.push(input[start..end].to_vec());
+        }
+    }
+
+    Ok(frames)
 }
 
 fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
@@ -125,7 +144,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
-    let padded = match pad_or_truncate(resampled, 480000) {
+    let padded = match pad_or_truncate(resampled, 480000, 400) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("{}", err);
@@ -146,6 +165,17 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
     if let Err(err) = save_wav("resampled.wav", &normalized, 16000) {
         eprintln!("Could not save resampled wav: {}", err);
     }
+
+    let framed = match frame_signal(normalized, 400, 160) {
+        Ok(v) => v,
+        Err(err) => {
+            eprint!("{}", err);
+            return;
+        }
+    };
+
+    eprint!("Framed audio has {} frames of size {}", framed.len(), framed[0].len());
+
 }
 
 
