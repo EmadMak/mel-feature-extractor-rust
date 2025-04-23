@@ -59,6 +59,20 @@ fn pad_or_truncate(input: Vec<f32>, target_len: usize) -> Result<Vec<f32>, Strin
     Ok(padded)
 }
 
+fn normalize(input: Vec<f32>) -> Result<Vec<f32>, String> {
+    let mean = input.iter().copied().sum::<f32>() / input.len() as f32;
+    let variance = input.iter()
+        .map(|x| (x - mean).powi(2))
+        .sum::<f32>() / input.len() as f32;
+    let std = variance.sqrt();
+
+    if std == 0.0 {
+        return Ok(vec![0.0; input.len()]);
+    }
+
+    Ok(input.into_iter().map(|x| (x - mean) / std).collect())
+}
+
 fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     let spec = WavSpec {
         channels: 1,
@@ -111,7 +125,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
-    let mel_ready = match pad_or_truncate(resampled, 480000) {
+    let padded = match pad_or_truncate(resampled, 480000) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("{}", err);
@@ -119,9 +133,17 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
-    println!("Final sample count: {}", mel_ready.len());
+    let normalized = match normalize(padded) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("{}", err);
+            return;
+        }
+    };
 
-    if let Err(err) = save_wav("resampled.wav", &mel_ready, 16000) {
+    println!("Final sample count: {}", normalized.len());
+
+    if let Err(err) = save_wav("resampled.wav", &normalized, 16000) {
         eprintln!("Could not save resampled wav: {}", err);
     }
 }
