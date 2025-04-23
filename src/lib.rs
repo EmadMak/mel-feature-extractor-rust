@@ -92,6 +92,21 @@ fn frame_signal(input: Vec<f32>, frame_length: usize, hop_length: usize) -> Resu
     Ok(frames)
 }
 
+fn apply_hann_window(mut input: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+    let frame_len = input[0].len();
+    let hann: Vec<f32> = (0..frame_len)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / frame_len as f32).cos())
+        .collect();
+    
+    for frame in input.iter_mut() {
+        for (i, sample) in frame.iter_mut().enumerate() {
+            *sample *= hann[i]
+        }
+    }
+
+    Ok(input)
+}
+
 fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     let spec = WavSpec {
         channels: 1,
@@ -174,8 +189,20 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
-    eprint!("Framed audio has {} frames of size {}", framed.len(), framed[0].len());
+    eprintln!("Framed audio has {} frames of size {}", framed.len(), framed[0].len());
 
+    let hann_weighted = match apply_hann_window(framed) {
+        Ok(v) => v,
+        Err(err) => {
+            eprint!("{}", err);
+            return;
+        }
+    };
+
+    eprintln!("Frame sample after hann:");
+    for s in &hann_weighted[1000] {
+        eprint!("{}", s);
+    }
 }
 
 
