@@ -5,6 +5,10 @@ use rubato::{SincFixedIn, SincInterpolationType, SincInterpolationParameters, Wi
 use realfft::RealFftPlanner;
 use num_complex::Complex;
 
+fn type_of<T>(_: &T) -> &'static str {
+    std::any::type_name::<&T>()
+}
+
 fn read_wav(path: &str) -> Result<(Vec<f32>, u32), String> {
     let reader = WavReader::open(path)
         .map_err(|e| format!("Failed to open WAV: {}", e))?;
@@ -132,6 +136,16 @@ fn apply_rfft(frames: Vec<Vec<f32>>) -> Result<Vec<Vec<Complex<f32>>>, String> {
     Ok(spectrogram)
 }
 
+fn power_spectrogram(spectrogram: Vec<Vec<Complex<f32>>>) -> Result<Vec<Vec<f32>>, String> {
+    Ok(spectrogram.into_iter()
+        .map(|frame|
+            frame.into_iter()
+                .map(|c| c.norm_sqr())
+                .collect()
+        ).collect()
+    )
+}
+
 fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     let spec = WavSpec {
         channels: 1,
@@ -232,7 +246,19 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
+    eprintln!("RFFT spectrogram type: {}", type_of(&rfft_spectrogram));
     eprintln!("RFFT Spectrogram shape: ({} x {})", rfft_spectrogram.len(), rfft_spectrogram[0].len());
+
+    let power_spec = match power_spectrogram(rfft_spectrogram) {
+        Ok(v) => v,
+        Err(err) => {
+            eprint!("{}", err);
+            return;
+        }
+    };
+
+    eprintln!("Power spectrogram type: {}", type_of(&power_spec));
+    eprintln!("Power spectrogram shape: ({} x {})", power_spec.len(), power_spec[0].len());
 }
 
 
