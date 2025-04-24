@@ -2,6 +2,8 @@ use hound::{WavReader, WavSpec, SampleFormat, WavWriter};
 use std::{ffi::CStr, i16};
 use std::os::raw::c_char;
 use rubato::{SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction, Resampler};
+use realfft::RealFftPlanner;
+use num_complex::Complex;
 
 fn read_wav(path: &str) -> Result<(Vec<f32>, u32), String> {
     let reader = WavReader::open(path)
@@ -26,9 +28,9 @@ fn read_wav(path: &str) -> Result<(Vec<f32>, u32), String> {
     Ok((mono, orig_sample_rate))
 }
 
-fn resample_audio(input: Vec<f32>, orig_rate: u32, target_rate: u32) -> Result<Vec<f32>, String> {
+fn resample_audio(samples: Vec<f32>, orig_rate: u32, target_rate: u32) -> Result<Vec<f32>, String> {
     if orig_rate == target_rate {
-        return Ok(input)
+        return Ok(samples)
     }
 
     let ratio = target_rate as f64 / orig_rate as f64;
@@ -39,72 +41,95 @@ fn resample_audio(input: Vec<f32>, orig_rate: u32, target_rate: u32) -> Result<V
         interpolation: SincInterpolationType::Cubic,
         window: WindowFunction::BlackmanHarris2,
     };
-    let mut resampler = SincFixedIn::<f32>::new(ratio, 1.0, params, input.len(), 1)
+    let mut resampler = SincFixedIn::<f32>::new(ratio, 1.0, params, samples.len(), 1)
         .map_err(|e| format!("Resampler init error: {:?}", e))?;
     let outputs = resampler
-        .process(&[input], None)
+        .process(&[samples], None)
         .map_err(|e| format!("Resampler init error: {:?}", e))?;
     Ok(outputs.into_iter().next().unwrap())
 }
 
-fn pad_or_truncate(mut input: Vec<f32>, target_len: usize, frame_length: usize) -> Result<Vec<f32>, String> {
-    if input.len() > target_len {
-        input.truncate(target_len);
-    } else if input.len() < target_len {
-        input.resize(target_len, 0.0);
+fn pad_or_truncate(mut samples: Vec<f32>, target_len: usize, frame_length: usize) -> Result<Vec<f32>, String> {
+    if samples.len() > target_len {
+        samples.truncate(target_len);
+    } else if samples.len() < target_len {
+        samples.resize(target_len, 0.0);
     }
 
     let pad_each = frame_length / 2;
-    let mut out = Vec::with_capacity(pad_each + input.len() + pad_each);
+    let mut out = Vec::with_capacity(pad_each + samples.len() + pad_each);
     out.extend(std::iter::repeat(0.0).take(pad_each));
-    out.extend(input);
+    out.extend(samples);
     out.extend(std::iter::repeat(0.0).take(pad_each));
     Ok(out)
 }
 
-fn normalize(input: Vec<f32>) -> Result<Vec<f32>, String> {
-    let mean = input.iter().copied().sum::<f32>() / input.len() as f32;
-    let variance = input.iter()
+fn normalize(samples: Vec<f32>) -> Result<Vec<f32>, String> {
+    let mean = samples.iter().copied().sum::<f32>() / samples.len() as f32;
+    let variance = samples.iter()
         .map(|x| (x - mean).powi(2))
-        .sum::<f32>() / input.len() as f32;
+        .sum::<f32>() / samples.len() as f32;
     let std = variance.sqrt();
 
     if std == 0.0 {
-        return Ok(vec![0.0; input.len()]);
+        return Ok(vec![0.0; samples.len()]);
     }
 
-    Ok(input.into_iter().map(|x| (x - mean) / std).collect())
+    Ok(samples.into_iter().map(|x| (x - mean) / std).collect())
 } 
 
-fn frame_signal(input: Vec<f32>, frame_length: usize, hop_length: usize) -> Result<Vec<Vec<f32>>, String> {
-    let num_frames = (input.len() - frame_length + hop_length) / hop_length;
+fn frame_signal(samples: Vec<f32>, frame_length: usize, hop_length: usize) -> Result<Vec<Vec<f32>>, String> {
+    let num_frames = (samples.len() - frame_length + hop_length) / hop_length;
     let mut frames = Vec::with_capacity(num_frames);
 
     for i in 0..num_frames {
         let start = i * hop_length;
         let end = start + frame_length;
 
-        if end <= input.len() {
-            frames.push(input[start..end].to_vec());
+        if end <= samples.len() {
+            frames.push(samples[start..end].to_vec());
         }
     }
 
     Ok(frames)
 }
 
-fn apply_hann_window(mut input: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
-    let frame_len = input[0].len();
+fn apply_hann_window(mut frames: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+    let frame_len = frames[0].len();
     let hann: Vec<f32> = (0..frame_len)
         .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / frame_len as f32).cos())
         .collect();
     
-    for frame in input.iter_mut() {
+    for frame in frames.iter_mut() {
         for (i, sample) in frame.iter_mut().enumerate() {
             *sample *= hann[i]
         }
     }
 
-    Ok(input)
+    Ok(frames)
+}
+
+fn apply_rfft(frames: Vec<Vec<f32>>) -> Result<Vec<Vec<Complex<f32>>>, String> {
+    let frame_len = frames[0].len();
+    
+    let mut planner = RealFftPlanner::<f32>::new();
+    let r2c = planner.plan_fft_forward(frame_len);
+
+    let mut output = r2c.make_output_vec();
+    let mut spectrogram = Vec::with_capacity(frames.len());
+
+    for frame in frames {
+
+        let mut input = r2c.make_input_vec();
+        input.copy_from_slice(&frame);
+
+        r2c.process(&mut input, &mut output)
+            .map_err(|e| format!("FFT error: {:?}", e))?;
+
+        spectrogram.push(output.clone());
+    }
+
+    Ok(spectrogram)
 }
 
 fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
@@ -199,10 +224,15 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
-    eprintln!("Frame sample after hann:");
-    for s in &hann_weighted[1000] {
-        eprint!("{}", s);
-    }
+    let rfft_spectrogram = match apply_rfft(hann_weighted) {
+        Ok(v) => v,
+        Err(err) => {
+            eprint!("{}", err);
+            return;
+        }
+    };
+
+    eprintln!("RFFT Spectrogram shape: ({} x {})", rfft_spectrogram.len(), rfft_spectrogram[0].len());
 }
 
 

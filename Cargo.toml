@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 hound = "3"
-realfft = "3"
+realfft = "3.0"
 rustfft = "6"
-rubato = { version = "0.16" }
-
+rubato = "0.16"
+num-complex = "0.4"
