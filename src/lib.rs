@@ -1,9 +1,31 @@
 use hound::{WavReader, WavSpec, SampleFormat, WavWriter};
-use std::{ffi::CStr, i16};
+use std::i16;
+use std::ffi::{CStr};
+use std::slice;
+use std::ptr;
 use std::os::raw::c_char;
 use rubato::{SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction, Resampler};
 use realfft::RealFftPlanner;
 use num_complex::Complex;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+
+//#[repr(C)]
+//pub struct MelSpectrogramData {
+//    pub data: *mut f32,
+//    pub n_frames: usize,
+//    pub n_mels: usize,
+//}
+
+//impl Default for MelSpectrogramData {
+//    fn default() -> Self {
+//        MelSpectrogramData { 
+//            data: ptr::null_mut(), 
+//            n_frames: 0, 
+//            n_mels: 0,
+//        }
+//    }
+//}
 
 fn type_of<T>(_: &T) -> &'static str {
     std::any::type_name::<&T>()
@@ -171,12 +193,28 @@ fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), Str
     Ok(())
 }
 
-fn hertz_to_mel_htk(frequency: f32) -> f32 {
-    2595.0 * (1.0 + frequency / 700.0).log10()
+fn hertz_to_mel_slaney(frequency: f32) -> f32 {
+    const MIN_LOG_HERTZ: f32 = 1000.0;
+    const MIN_LOG_MEL: f32 = 15.0;
+    let LOGSTEP: f32 = 27.0 / (6.4f32.ln());
+
+    let mut mels = 3.0 * frequency / 200.0;
+    if frequency >= MIN_LOG_HERTZ {
+        mels = MIN_LOG_MEL + (frequency / MIN_LOG_HERTZ).ln() * LOGSTEP;
+    }
+    mels
 }
 
-fn mel_to_hertz_htk(mel: f32) -> f32 {
-    700.0 * (10f32.powf(mel / 2595.0) - 1.0)
+fn mel_to_hertz_slaney(mel: f32) -> f32 {
+    const MIN_LOG_HERTZ: f32 = 1000.0;
+    const MIN_LOG_MEL: f32 = 15.0;
+    let LOGSTEP: f32 = (6.4f32.ln()) / 27.0;
+
+    let mut f = 200.0 * mel / 3.0;
+    if mel >= MIN_LOG_MEL {
+        f = MIN_LOG_HERTZ * (LOGSTEP * (mel - MIN_LOG_MEL)).exp();
+    }
+    f
 }
 
 fn linspace(start: f32, end: f32, num: usize) -> Vec<f32> {
@@ -234,35 +272,142 @@ fn mel_filter_bank(
     min_frequency: f32,
     max_frequency: f32,
     sampling_rate: u32,
+    use_slaney_norm: bool,
 ) -> Result<Vec<Vec<f32>>, String> {
     let nyquist = sampling_rate as f32 / 2.0;
-    let mel_min = hertz_to_mel_htk(min_frequency);
-    let mel_max = hertz_to_mel_htk(max_frequency);
+    let mel_min = hertz_to_mel_slaney(min_frequency);
+    let mel_max = hertz_to_mel_slaney(max_frequency);
 
     let mel_freqs_vec = linspace(mel_min, mel_max, num_mel_filters + 2);
 
     let mut filter_freqs_hz: Vec<f32> = Vec::with_capacity(mel_freqs_vec.len());
 
     for mel in mel_freqs_vec.iter() {
-        filter_freqs_hz.push(mel_to_hertz_htk(*mel));
+        filter_freqs_hz.push(mel_to_hertz_slaney(*mel));
     }
 
-    let fft_freqs: Vec<f32>;
-    let filter_freqs_for_triangulation: &[f32];
-//    let fft_bin_width = sampling_rate as f32 / ((num_frequency_bins - 1) as f32 * 2.0);
     let fft_freqs_hz = linspace(0.0, nyquist, num_frequency_bins);
 
     let mut fft_freqs_mel = Vec::with_capacity(num_frequency_bins);
     for freq_hz in fft_freqs_hz.iter() {
-        fft_freqs_mel.push(hertz_to_mel_htk(*freq_hz));
+        fft_freqs_mel.push(hertz_to_mel_slaney(*freq_hz));
     }
-    fft_freqs = fft_freqs_mel;
-    filter_freqs_for_triangulation = &mel_freqs_vec;
 
-    let mel_filters = create_triangular_filter_bank(&fft_freqs, filter_freqs_for_triangulation)?;
+    let mut mel_filters = create_triangular_filter_bank(&fft_freqs_hz, &filter_freqs_hz)?;
+    
+    if use_slaney_norm {
+        let mut slaney_norm_factors = Vec::with_capacity(num_mel_filters);
+        for i in 0..num_mel_filters {
+            let left_hz = filter_freqs_hz[i];
+            let right_hz = filter_freqs_hz[i+2];
+            let width = right_hz - left_hz;
 
+            if width > f32::EPSILON {
+                slaney_norm_factors.push(2.0 / width);
+            } else {
+                eprintln!("Warning: Mel filter {} has zero or negative width ({}), setting norm factor to 0.", i, width);
+                slaney_norm_factors.push(0.0);
+            }
+        }
+
+        for row in mel_filters.iter_mut() {
+            for m in 0..num_mel_filters {
+                row[m] *= slaney_norm_factors[m];
+            }
+        }
+    }
+    
     Ok(mel_filters)
 } 
+
+fn apply_log(mut mel_spectrogram: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+    let epsilon = 1e-10f32;
+    
+    for row in mel_spectrogram.iter_mut() {
+        for val in row.iter_mut() {
+            if val.is_nan() {
+                return Err("Encountered nan value in mel spectrogram".to_string());
+            }
+            *val = (val.max(epsilon)).log10();
+        }
+    }
+
+    Ok(mel_spectrogram)
+}
+
+pub fn save_matrix_as_csv(
+    matrix: Vec<Vec<f32>>,
+    output_path: &str,
+    transpose: bool,
+) -> Result<(), String> {
+    let rows = matrix.len();
+    if rows == 0 {
+        return Err("Matrix has no rows.".into());
+    }
+    let cols = matrix[0].len();
+    if cols == 0 {
+        return Err("Matrix has no columns.".into());
+    }
+    for (i, row) in matrix.iter().enumerate().skip(1) {
+        if row.len() != cols {
+            return Err(format!("Row {} has length {}, but expected {}", i, row.len(), cols));
+        }
+    }
+
+    let to_write: Vec<Vec<f32>> = if transpose {
+        let mut t = vec![vec![0.0; rows]; cols];
+        for i in 0..rows {
+            for j in 0..cols {
+                t[j][i] = matrix[i][j];
+            }
+        }
+        t
+    } else {
+        matrix
+    };
+
+    let file = File::create(output_path)
+        .map_err(|e| format!("Failed to create file '{}': {}", output_path, e))?;
+    let mut writer = BufWriter::new(file);
+
+    for row in to_write {
+        let line = row
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(writer, "{}", line)
+            .map_err(|e| format!("Failed to write to '{}': {}", output_path, e))?;
+    }
+
+    Ok(())
+}
+
+fn apply_dynamic_range_compression(mut mel_log_spectrogram: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+    if mel_log_spectrogram.is_empty() || mel_log_spectrogram[0].is_empty() {
+        return Ok(mel_log_spectrogram);
+    }
+
+    let mut max_val = f32::NEG_INFINITY;
+    for row in mel_log_spectrogram.iter() {
+        for val in row.iter() {
+            if *val > max_val {
+                max_val = *val;
+            }
+        }
+    }
+
+    let floor_val = max_val - 8.0;
+
+    for row in mel_log_spectrogram.iter_mut() {
+        for val in row.iter_mut() {
+            *val = val.max(floor_val);
+            *val = (*val + 4.0) / 4.0; 
+        }
+    }
+
+    Ok(mel_log_spectrogram)
+}
 
 #[no_mangle]
 pub extern "C" fn extract_whisper_features(path: *const c_char) {
@@ -299,21 +444,21 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         }
     };
 
-    let normalized = match normalize(padded) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("{}", err);
-            return;
-        }
-    };
+//    let normalized = match normalize(padded) {
+//        Ok(v) => v,
+//        Err(err) => {
+//            eprintln!("{}", err);
+//            return;
+//        }
+//    };
 
-    println!("Final sample count: {}", normalized.len());
+    println!("Final sample count: {}", padded.len());
 
-    if let Err(err) = save_wav("resampled.wav", &normalized, 16000) {
+    if let Err(err) = save_wav("resampled.wav", &padded, 16000) {
         eprintln!("Could not save resampled wav: {}", err);
     }
 
-    let framed = match frame_signal(normalized, 400, 160) {
+    let framed = match frame_signal(padded, 400, 160) {
         Ok(v) => v,
         Err(err) => {
             eprint!("{}", err);
@@ -342,6 +487,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
     eprintln!("RFFT spectrogram type: {}", type_of(&rfft_spectrogram));
     eprintln!("RFFT Spectrogram shape: ({} x {})", rfft_spectrogram.len(), rfft_spectrogram[0].len());
 
+
     let power_spec = match power_spectrogram(rfft_spectrogram) {
         Ok(v) => v,
         Err(err) => {
@@ -353,13 +499,22 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
     eprintln!("Power spectrogram type: {}", type_of(&power_spec));
     eprintln!("Power spectrogram shape: ({} x {})", power_spec.len(), power_spec[0].len());
 
-    let mel_filters = match mel_filter_bank(201, 80, 0.0, 8000.0, 16000) {
+    if let Err(e) = save_matrix_as_csv(power_spec.clone(), "power_spectrogram.csv", true) {
+        eprintln!("Failed to save power spectrogram: {}", e);
+    }
+
+
+    let mel_filters = match mel_filter_bank(201, 80, 0.0, 8000.0, 16000, true) {
         Ok(v) => v,
         Err(err) => {
             eprint!("{}", err);
             return;
         }
     };
+
+    if let Err(e) = save_matrix_as_csv(mel_filters.clone(), "mel_filters.csv", false) {
+        eprintln!("Falied to save mel filters: {}", e);
+    }
 
     println!("Mel filter bank shape: ({} x {})", mel_filters.len(), mel_filters[0].len());
     
@@ -376,6 +531,29 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
     }
 
     println!("Mel spectrogram shape: ({} x {})", mel_spectrogram.len(), mel_spectrogram[0].len());
+
+    let mel_log_spectrogram = match apply_log(mel_spectrogram) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("{}", err);
+            return;
+        }
+    };
+
+    let final_spectrogram = match apply_dynamic_range_compression(mel_log_spectrogram) {
+         Ok(v) => v,
+         Err(err) => {
+             eprintln!("Error during dynamic range compression: {}", err);
+             return;
+         }
+    };
+
+    if let Err(e) = save_matrix_as_csv(final_spectrogram, "output.csv", true) {
+        eprintln!("Failed to save spectrogram: {}", e);
+    }
+
+
+
 }
 
 
