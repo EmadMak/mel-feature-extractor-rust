@@ -1,15 +1,12 @@
-use hound::{WavReader, WavSpec, SampleFormat, WavWriter};
+use hound::WavReader;
 use std::i16;
-use std::ffi::{CStr};
+use std::ffi::CStr;
 use std::slice;
 use std::ptr;
 use std::os::raw::c_char;
 use rubato::{SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction, Resampler};
 use realfft::RealFftPlanner;
 use num_complex::Complex;
-use std::fs::File;
-use std::io::{BufWriter, Write};
-
 
 #[repr(C)]
 pub struct MelSpectrogramData {
@@ -26,11 +23,6 @@ impl Default for MelSpectrogramData {
             n_mels: 0,
         }
     }
-}
-
-
-fn type_of<T>(_: &T) -> &'static str {
-    std::any::type_name::<&T>()
 }
 
 fn read_wav(path: &str) -> Result<(Vec<f32>, u32), String> {
@@ -91,20 +83,6 @@ fn pad_or_truncate(mut samples: Vec<f32>, target_len: usize, frame_length: usize
     out.extend(std::iter::repeat(0.0).take(pad_each));
     Ok(out)
 }
-
-fn normalize(samples: Vec<f32>) -> Result<Vec<f32>, String> {
-    let mean = samples.iter().copied().sum::<f32>() / samples.len() as f32;
-    let variance = samples.iter()
-        .map(|x| (x - mean).powi(2))
-        .sum::<f32>() / samples.len() as f32;
-    let std = variance.sqrt();
-
-    if std == 0.0 {
-        return Ok(vec![0.0; samples.len()]);
-    }
-
-    Ok(samples.into_iter().map(|x| (x - mean) / std).collect())
-} 
 
 fn frame_signal(samples: Vec<f32>, frame_length: usize, hop_length: usize) -> Result<Vec<Vec<f32>>, String> {
     let num_frames = (samples.len() - frame_length + hop_length) / hop_length;
@@ -170,39 +148,14 @@ fn power_spectrogram(spectrogram: Vec<Vec<Complex<f32>>>) -> Result<Vec<Vec<f32>
     )
 }
 
-fn save_wav(out_path: &str, samples: &[f32], sample_rate: u32) -> Result<(), String> {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: sample_rate,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-
-    let mut writer = WavWriter::create(out_path, spec)
-        .map_err(|e| format!("Failed to open WAV: {}", e))?;
-
-    for &sample in samples {
-        let scaled = (sample.max(-1.0).min(1.0) * i16::MAX as f32) as i16;
-        writer
-            .write_sample(scaled)
-            .map_err(|e| format!("Failed to write sample: {}", e))?;
-    }
-
-    writer
-        .finalize()
-        .map_err(|e| format!("Failed to finalize wav: {}", e))?;
-
-    Ok(())
-}
-
 fn hertz_to_mel_slaney(frequency: f32) -> f32 {
     const MIN_LOG_HERTZ: f32 = 1000.0;
     const MIN_LOG_MEL: f32 = 15.0;
-    let LOGSTEP: f32 = 27.0 / (6.4f32.ln());
+    let logstep: f32 = 27.0 / (6.4f32.ln());
 
     let mut mels = 3.0 * frequency / 200.0;
     if frequency >= MIN_LOG_HERTZ {
-        mels = MIN_LOG_MEL + (frequency / MIN_LOG_HERTZ).ln() * LOGSTEP;
+        mels = MIN_LOG_MEL + (frequency / MIN_LOG_HERTZ).ln() * logstep;
     }
     mels
 }
@@ -210,11 +163,11 @@ fn hertz_to_mel_slaney(frequency: f32) -> f32 {
 fn mel_to_hertz_slaney(mel: f32) -> f32 {
     const MIN_LOG_HERTZ: f32 = 1000.0;
     const MIN_LOG_MEL: f32 = 15.0;
-    let LOGSTEP: f32 = (6.4f32.ln()) / 27.0;
+    let logstep: f32 = (6.4f32.ln()) / 27.0;
 
     let mut f = 200.0 * mel / 3.0;
     if mel >= MIN_LOG_MEL {
-        f = MIN_LOG_HERTZ * (LOGSTEP * (mel - MIN_LOG_MEL)).exp();
+        f = MIN_LOG_HERTZ * (logstep * (mel - MIN_LOG_MEL)).exp();
     }
     f
 }
@@ -337,54 +290,6 @@ fn apply_log(mut mel_spectrogram: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String
     Ok(mel_spectrogram)
 }
 
-pub fn save_matrix_as_csv(
-    matrix: Vec<Vec<f32>>,
-    output_path: &str,
-    transpose: bool,
-) -> Result<(), String> {
-    let rows = matrix.len();
-    if rows == 0 {
-        return Err("Matrix has no rows.".into());
-    }
-    let cols = matrix[0].len();
-    if cols == 0 {
-        return Err("Matrix has no columns.".into());
-    }
-    for (i, row) in matrix.iter().enumerate().skip(1) {
-        if row.len() != cols {
-            return Err(format!("Row {} has length {}, but expected {}", i, row.len(), cols));
-        }
-    }
-
-    let to_write: Vec<Vec<f32>> = if transpose {
-        let mut t = vec![vec![0.0; rows]; cols];
-        for i in 0..rows {
-            for j in 0..cols {
-                t[j][i] = matrix[i][j];
-            }
-        }
-        t
-    } else {
-        matrix
-    };
-
-    let file = File::create(output_path)
-        .map_err(|e| format!("Failed to create file '{}': {}", output_path, e))?;
-    let mut writer = BufWriter::new(file);
-
-    for row in to_write {
-        let line = row
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        writeln!(writer, "{}", line)
-            .map_err(|e| format!("Failed to write to '{}': {}", output_path, e))?;
-    }
-
-    Ok(())
-}
-
 fn apply_dynamic_range_compression(mut mel_log_spectrogram: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
     if mel_log_spectrogram.is_empty() || mel_log_spectrogram[0].is_empty() {
         return Ok(mel_log_spectrogram);
@@ -460,20 +365,6 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
         }
     };
 
-//    let normalized = match normalize(padded) {
-//        Ok(v) => v,
-//        Err(err) => {
-//            eprintln!("{}", err);
-//            return;
-//        }
-//    };
-
-    println!("Final sample count: {}", padded.len());
-
-//    if let Err(err) = save_wav("resampled.wav", &padded, 16000) {
-//        eprintln!("Could not save resampled wav: {}", err);
-//    }
-
     let framed = match frame_signal(padded, 400, 160) {
         Ok(v) => v,
         Err(err) => {
@@ -481,8 +372,6 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
             return MelSpectrogramData::default();
         }
     };
-
-    eprintln!("Framed audio has {} frames of size {}", framed.len(), framed[0].len());
 
     let hann_weighted = match apply_hann_window(framed) {
         Ok(v) => v,
@@ -500,10 +389,6 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
         }
     };
 
-    eprintln!("RFFT spectrogram type: {}", type_of(&rfft_spectrogram));
-    eprintln!("RFFT Spectrogram shape: ({} x {})", rfft_spectrogram.len(), rfft_spectrogram[0].len());
-
-
     let power_spec = match power_spectrogram(rfft_spectrogram) {
         Ok(v) => v,
         Err(err) => {
@@ -511,14 +396,6 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
             return MelSpectrogramData::default();
         }
     };
-
-    eprintln!("Power spectrogram type: {}", type_of(&power_spec));
-    eprintln!("Power spectrogram shape: ({} x {})", power_spec.len(), power_spec[0].len());
-
-//    if let Err(e) = save_matrix_as_csv(power_spec.clone(), "power_spectrogram.csv", true) {
-//        eprintln!("Failed to save power spectrogram: {}", e);
-//    }
-
 
     let mel_filters = match mel_filter_bank(201, 80, 0.0, 8000.0, 16000, true) {
         Ok(v) => v,
@@ -528,11 +405,6 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
         }
     };
 
-//    if let Err(e) = save_matrix_as_csv(mel_filters.clone(), "mel_filters.csv", false) {
-//        eprintln!("Falied to save mel filters: {}", e);
-//    }
-
-    println!("Mel filter bank shape: ({} x {})", mel_filters.len(), mel_filters[0].len());
     
     let mut mel_spectrogram = vec![vec![0.0f32; 80]; 3000];
 
@@ -545,8 +417,6 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
         mel_spectrogram[i][m] = sum;
         }
     }
-
-    println!("Mel spectrogram shape: ({} x {})", mel_spectrogram.len(), mel_spectrogram[0].len());
 
     let mel_log_spectrogram = match apply_log(mel_spectrogram) {
         Ok(v) => v,
@@ -564,10 +434,6 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
          }
     };
 
-//   if let Err(e) = save_matrix_as_csv(final_spectrogram, "output.csv", true) {
-//        eprintln!("Failed to save spectrogram: {}", e);
-//    }
-
     let transposed_spectrogram = match transpose(final_spectrogram) {
         Ok(v) => v,
         Err(err) => {
@@ -576,9 +442,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
         }
     };
 
-    println!("Final spectrogram shape: ({} x {})", transposed_spectrogram.len(), transposed_spectrogram[0].len());
-
-    let mut flat_spectrogram: Vec<f32> = transposed_spectrogram.into_iter().flatten().collect();
+    let flat_spectrogram: Vec<f32> = transposed_spectrogram.into_iter().flatten().collect();
 
     let leaked_slice = flat_spectrogram.into_boxed_slice();
     let data_ptr = Box::leak(leaked_slice).as_mut_ptr();
