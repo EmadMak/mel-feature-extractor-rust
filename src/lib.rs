@@ -10,22 +10,24 @@ use num_complex::Complex;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-//#[repr(C)]
-//pub struct MelSpectrogramData {
-//    pub data: *mut f32,
-//    pub n_frames: usize,
-//    pub n_mels: usize,
-//}
 
-//impl Default for MelSpectrogramData {
-//    fn default() -> Self {
-//        MelSpectrogramData { 
-//            data: ptr::null_mut(), 
-//            n_frames: 0, 
-//            n_mels: 0,
-//        }
-//    }
-//}
+#[repr(C)]
+pub struct MelSpectrogramData {
+    pub data: *mut f32,
+    pub n_frames: usize,
+    pub n_mels: usize,
+}
+
+impl Default for MelSpectrogramData {
+    fn default() -> Self {
+        MelSpectrogramData { 
+            data: ptr::null_mut(), 
+            n_frames: 0, 
+            n_mels: 0,
+        }
+    }
+}
+
 
 fn type_of<T>(_: &T) -> &'static str {
     std::any::type_name::<&T>()
@@ -409,14 +411,28 @@ fn apply_dynamic_range_compression(mut mel_log_spectrogram: Vec<Vec<f32>>) -> Re
     Ok(mel_log_spectrogram)
 }
 
+fn transpose(matrix: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+    let mut transposed_matrix = vec![vec![0.0f32; 3000]; 80];
+
+    let num_rows = matrix.len();
+    let num_cols = matrix[0].len();
+
+    for i in 0..num_cols {
+        for j in 0..num_rows {
+            transposed_matrix[i][j] = matrix[j][i];
+        }
+    }
+    Ok(transposed_matrix)
+}
+
 #[no_mangle]
-pub extern "C" fn extract_whisper_features(path: *const c_char) {
+pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogramData {
     let c_str = unsafe { CStr::from_ptr(path) };
     let path_str = match c_str.to_str() {
         Ok(s) => s,
         Err(_) => {
             eprintln!("Invalid UTF-8 path");
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -424,7 +440,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -432,7 +448,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         Ok(buf) => buf,
         Err(err) => {
             eprintln!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -440,7 +456,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -454,15 +470,15 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
 
     println!("Final sample count: {}", padded.len());
 
-    if let Err(err) = save_wav("resampled.wav", &padded, 16000) {
-        eprintln!("Could not save resampled wav: {}", err);
-    }
+//    if let Err(err) = save_wav("resampled.wav", &padded, 16000) {
+//        eprintln!("Could not save resampled wav: {}", err);
+//    }
 
     let framed = match frame_signal(padded, 400, 160) {
         Ok(v) => v,
         Err(err) => {
             eprint!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -472,7 +488,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         Ok(v) => v,
         Err(err) => {
             eprint!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -480,7 +496,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         Ok(v) => v,
         Err(err) => {
             eprint!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -492,35 +508,35 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         Ok(v) => v,
         Err(err) => {
             eprint!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
     eprintln!("Power spectrogram type: {}", type_of(&power_spec));
     eprintln!("Power spectrogram shape: ({} x {})", power_spec.len(), power_spec[0].len());
 
-    if let Err(e) = save_matrix_as_csv(power_spec.clone(), "power_spectrogram.csv", true) {
-        eprintln!("Failed to save power spectrogram: {}", e);
-    }
+//    if let Err(e) = save_matrix_as_csv(power_spec.clone(), "power_spectrogram.csv", true) {
+//        eprintln!("Failed to save power spectrogram: {}", e);
+//    }
 
 
     let mel_filters = match mel_filter_bank(201, 80, 0.0, 8000.0, 16000, true) {
         Ok(v) => v,
         Err(err) => {
             eprint!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
-    if let Err(e) = save_matrix_as_csv(mel_filters.clone(), "mel_filters.csv", false) {
-        eprintln!("Falied to save mel filters: {}", e);
-    }
+//    if let Err(e) = save_matrix_as_csv(mel_filters.clone(), "mel_filters.csv", false) {
+//        eprintln!("Falied to save mel filters: {}", e);
+//    }
 
     println!("Mel filter bank shape: ({} x {})", mel_filters.len(), mel_filters[0].len());
     
-    let mut mel_spectrogram = vec![vec![0.0f32; 80]; 3001];
+    let mut mel_spectrogram = vec![vec![0.0f32; 80]; 3000];
 
-    for i in 0..3001 {
+    for i in 0..3000 {
         for m in 0..80 {
             let mut sum = 0.0;
             for k in 0..201 {
@@ -536,7 +552,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("{}", err);
-            return;
+            return MelSpectrogramData::default();
         }
     };
 
@@ -544,16 +560,46 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) {
          Ok(v) => v,
          Err(err) => {
              eprintln!("Error during dynamic range compression: {}", err);
-             return;
+             return MelSpectrogramData::default();
          }
     };
 
-    if let Err(e) = save_matrix_as_csv(final_spectrogram, "output.csv", true) {
-        eprintln!("Failed to save spectrogram: {}", e);
+//   if let Err(e) = save_matrix_as_csv(final_spectrogram, "output.csv", true) {
+//        eprintln!("Failed to save spectrogram: {}", e);
+//    }
+
+    let transposed_spectrogram = match transpose(final_spectrogram) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("Error during transposing: {}", err);
+            return MelSpectrogramData::default();
+        }
+    };
+
+    println!("Final spectrogram shape: ({} x {})", transposed_spectrogram.len(), transposed_spectrogram[0].len());
+
+    let mut flat_spectrogram: Vec<f32> = transposed_spectrogram.into_iter().flatten().collect();
+
+    let leaked_slice = flat_spectrogram.into_boxed_slice();
+    let data_ptr = Box::leak(leaked_slice).as_mut_ptr();
+
+    MelSpectrogramData {
+        data: data_ptr,
+        n_frames: 3000,
+        n_mels: 80,
     }
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn free_spectrogram_data(spectrogram_data: MelSpectrogramData) {
+    if !spectrogram_data.data.is_null() {
+        let len = spectrogram_data.n_frames * spectrogram_data.n_mels;
 
+        let slice = slice::from_raw_parts_mut(spectrogram_data.data, len);
+        let b = Box::from_raw(slice);
 
+        drop(b);
+    }
 }
 
 
