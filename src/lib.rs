@@ -316,20 +316,6 @@ fn apply_dynamic_range_compression(mut mel_log_spectrogram: Vec<Vec<f32>>) -> Re
     Ok(mel_log_spectrogram)
 }
 
-fn transpose(matrix: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
-    let mut transposed_matrix = vec![vec![0.0f32; 3000]; 80];
-
-    let num_rows = matrix.len();
-    let num_cols = matrix[0].len();
-
-    for i in 0..num_cols {
-        for j in 0..num_rows {
-            transposed_matrix[i][j] = matrix[j][i];
-        }
-    }
-    Ok(transposed_matrix)
-}
-
 #[no_mangle]
 pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogramData {
     let c_str = unsafe { CStr::from_ptr(path) };
@@ -406,7 +392,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
     };
 
     
-    let mut mel_spectrogram = vec![vec![0.0f32; 80]; 3000];
+    let mut mel_spectrogram = vec![vec![0.0f32; 3000]; 80];
 
     for i in 0..3000 {
         for m in 0..80 {
@@ -414,7 +400,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
             for k in 0..201 {
                 sum += power_spec[i][k] * mel_filters[k][m];
             }
-        mel_spectrogram[i][m] = sum;
+        mel_spectrogram[m][i] = sum;
         }
     }
 
@@ -434,15 +420,7 @@ pub extern "C" fn extract_whisper_features(path: *const c_char) -> MelSpectrogra
          }
     };
 
-    let transposed_spectrogram = match transpose(final_spectrogram) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("Error during transposing: {}", err);
-            return MelSpectrogramData::default();
-        }
-    };
-
-    let flat_spectrogram: Vec<f32> = transposed_spectrogram.into_iter().flatten().collect();
+    let flat_spectrogram: Vec<f32> = final_spectrogram.into_iter().flatten().collect();
 
     let leaked_slice = flat_spectrogram.into_boxed_slice();
     let data_ptr = Box::leak(leaked_slice).as_mut_ptr();
